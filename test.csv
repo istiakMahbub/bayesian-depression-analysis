@@ -1,0 +1,11 @@
+Ville_id,sex,Age,Married,Number_children,education_level,total_members,depressed,Class
+25,female,67,no,0,1,1,1,yes
+57,female,23,yes,3,8,5,1,yes
+130,male,34,no,1,9,3,1,yes
+52,female,84,no,0,1,1,1,yes
+100,female,56,yes,0,12,2,1,yes
+91,male,28,yes,4,10,5,0,no
+115,male,22,yes,3,9,5,0,no
+97,male,27,yes,2,10,4,0,no
+42,female,59,no,4,10,6,0,no
+72,male,21,yes,2,10,4,0,no

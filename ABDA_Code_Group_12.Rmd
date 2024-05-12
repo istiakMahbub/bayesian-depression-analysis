@@ -1,0 +1,584 @@
+---
+title: "ABDA_Code_Group_12"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Submitted by
+### Mohammad Istiak Mahbub, Mukta Ghosh, Naim Ahmad
+
+### Load Necessary Libraries 
+
+```{r libraries}
+library(dplyr)      # for data manipulation
+library(tidyr)      # for helping in tidying data
+library(tidyverse)  # for data manipulation and plots
+library(haven)      # for reading sav data
+library(sjstats)    # for calculating intra-class correlation (ICC)
+library(ROCR)       # for calculating the area under the curve (AUC) statistics
+library(brms)       # for Bayesian (multilevel) generalized linear modelling
+library(modelr)     # for data manipulation
+library(tidybayes)  # for analysis of posterior draws of a Bayesian model
+library(bayesplot)  # for visualizing Bayesian models
+library(ggplot2)    # for the creation of complex, layered plots
+library(rstan)      # for the specification, estimation, and analysis of Bayesian models
+library(caret)      # for Downsampling
+```
+
+### Load Dataset 
+
+```{r Load dataset}
+df <- read.csv("b_depressed.csv")
+```
+
+#### Create a new data frame with selected columns
+
+```{r Create a new data frame}
+colnames(df)
+df <- df[, c("Ville_id", "sex", "Age", "Married", "Number_children", "education_level", "total_members", "depressed")]
+head(df)
+```
+
+###  Data Preprocessing
+
+#### Data Processing: Histogram
+```{r Histograms}
+# Increase the size of the plotting device
+options(repr.plot.width = 12, repr.plot.height = 8)
+
+# Set up a 4x6 grid of plots (adjust rows and columns based on your needs)
+par(mfrow = c(2, 4))
+
+# Loop through each column and plot a histogram
+for (col in colnames(df)) {
+  hist(df[[col]], 
+       main = col,  # Set the variable name as the title
+       xlab = col,  # Set the variable name as the x-axis label
+       col = "skyblue",
+       border = "black"
+  )
+}
+
+# Reset the plotting parameters to the default values
+par(mfrow = c(1, 1))
+```
+
+#### Data Processing: Factorization
+```{r Factorization}
+df <- df %>%
+  mutate(Ville_id = factor(Ville_id),
+         sex = if_else(sex == 0, "female", "male"),
+         sex = factor(sex, levels = c("female", "male")),
+         Married = if_else(Married == 0, "no", "yes"),
+         Married = factor(Married, levels = c("no", "yes")),
+         depressed = if_else(depressed == 0, "no", "yes"),
+         depressed = factor(depressed, levels = c("no", "yes")))
+
+head(df)
+```
+
+#### Data Processing: Inspect Missing Values
+```{r Inspect Missing Values}
+df %>%
+  summarise_each(list(~sum(is.na(.)))) %>%
+  gather()
+```
+
+#### Data Processing: Downsampling 
+```{r Downsampling}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Create an under sampled dataset
+undersampled_data <- downSample(df[, -23], df$depressed)
+
+df_updated <- undersampled_data %>%
+  mutate(depressed = as.numeric(ifelse(Class == "yes", 1, 0)))
+
+head(df_updated)
+
+summary(df$depressed)
+summary(undersampled_data$depressed)
+```
+
+### Load Test Data 
+```{r Load test data}
+df_test <- read.csv("test.csv")
+head(df_test)
+
+## Factorize test data to keep consistancy 
+df_test <- df_test %>%
+  mutate(         Class = factor(Class, levels = c("no", "yes")))
+
+head(df_test)
+```
+
+## Model : M1 ############------------------------------------------------------------
+```{r M1}
+#Fit a Bayesian Binary Logistic Regression Model
+
+M1 <- brm(formula = depressed ~ sex + Married,  
+          data=df_updated, 
+          family = bernoulli(link = "logit"), save_pars = save_pars(all = TRUE))
+```
+
+#### Model Summary 
+```{r M1:Summary}
+summary(M1)
+```
+
+### Model Convergence Check
+
+#### Trace Plot 
+```{r M1: Trace plot}
+mcmc_plot(M1, type = "trace")
+```
+
+#### Autocorrelation Plot
+```{r M1: autocorrelation}
+mcmc_plot(M1, type = "acf_bar")
+```
+
+#### Parameter Estimates
+```{r M1: Parameter estimates}
+#To interpret the value of the parameter estimates, need to exponentiate the estimates
+exp(fixef(M1)[,-2])
+
+# Densities of parameter estimates
+mcmc_plot(M1, type = "areas", prob = 0.95, 
+          transformations = "exp") + geom_vline(xintercept = 1, color = "grey")
+```
+
+#### Visualisation of Parameter Effects
+```{r M1: Parameter Effects}
+df_updated %>%
+  data_grid(sex, Married) %>%
+  add_fitted_draws(M1) %>%
+  ggplot(aes(x = .value, y = interaction(sex, Married))) +
+  stat_pointintervalh(.width = c(.68, .95)) +
+  coord_flip() +
+  xlab("Predicted Probability") 
+#  scale_x_continuous(breaks = seq(0, 0.24, 0.02))
+```
+
+### Model Evaluation : M1 
+
+#### Posterior Predictive Checks for M1
+```{r M1: Posterior predictive check}
+# Generate posterior predictive samples
+pp_samples <- posterior_predict(M1)
+dim(pp_samples)
+
+# Compute observed and simulated proportions of depressed individuals
+observed_prop <- mean(df_updated$depressed)
+simulated_props <- colMeans(pp_samples)
+
+# Plot histogram of simulated proportions
+hist(simulated_props, main = "Posterior Predictive Check: M1",
+     xlab = "Proportion of Depressed Individuals", ylab = "Frequency",
+     breaks = 20, col = "lightblue", border = "white")
+
+# Add a vertical line for the observed proportion
+abline(v = observed_prop, col = "red", lwd = 2)
+
+# Add legend
+legend("topright", legend = c("Observed Proportion", "Simulated Proportions"),
+       col = c("red", "lightblue"), lty = 1, lwd = 2)
+```
+
+#### AUC : Compute AUC for predicting Class with the model
+```{r M1: AUC}
+Prob_M1 <- predict(M1, newdata = df_test, type = "response")
+Prob_M1 <- Prob_M1[,1]
+Pred_M1 <- prediction(Prob_M1, as.vector(pull(df_test, depressed)))
+AUC_M1 <- performance(Pred_M1, measure = "auc")
+AUC_M1 <- AUC_M1@y.values[[1]]
+AUC_M1
+```
+
+## Model : M2 ############------------------------------------------------------------
+#### Transform Data
+```{r M2: Transform Data}
+colnames(df_updated)
+df_Prop <- df_updated %>%
+  group_by(Ville_id) %>%
+  summarise(Number_children= sum(Number_children)/n(),
+            depressed = sum(depressed),
+            TOTAL = n()) %>%
+  ungroup()
+
+#  In this new data set, 'depressed' refers to the number who is depressed; 
+# 'TOTAL' refers to the total number in a particular Village (Ville_id)
+head(df_Prop)
+```
+
+#### Explore Data
+
+```{r M2: Explore data}
+df_Prop %>%
+  ggplot(aes(x = exp(Number_children)/(1+exp(Number_children)), y = depressed/TOTAL)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+
+```{r M2}
+# Fit a Binomial Logistic Regression Model
+
+M2 <- brm(depressed | trials(TOTAL) ~ Number_children,  
+          data = df_Prop, 
+          family = binomial(link = "logit"), save_pars = save_pars(all = TRUE))
+```
+
+#### Model Summary 
+```{r M2:Summary}
+summary(M2)
+```
+
+### Model Convergence Check
+
+#### Trace Plot 
+```{r Trace plot}
+mcmc_plot(M2, type = "trace")
+```
+
+#### Autocorrelation Plot
+```{r M2: autocorrelation}
+mcmc_plot(M2, type = "acf_bar")
+```
+
+#### Parameter estimates
+```{r M2: Parameter estimates}
+mcmc_plot(M2)
+```
+
+### Model Evaluation : M2 
+
+#### Posterior predictive checks for M2
+```{r M2: Posterior predictive check}
+# Generate posterior predictive samples
+pp_samples <- posterior_predict(M2)
+dim(pp_samples)
+
+# Compute observed and simulated proportions of depressed individuals
+observed_prop <- mean(df_updated$depressed)
+simulated_props <- colMeans(pp_samples)
+
+# Plot histogram of simulated proportions
+hist(simulated_props, main = "Posterior Predictive Check: M2",
+     xlab = "Proportion of Depressed Individuals", ylab = "Frequency",
+     breaks = 20, col = "lightblue", border = "white")
+
+# Add a vertical line for the observed proportion
+abline(v = observed_prop, col = "red", lwd = 2)
+
+# Add legend
+legend("topright", legend = c("Observed Proportion", "Simulated Proportions"),
+       col = c("red", "lightblue"), lty = 1, lwd = 2)
+```
+
+## Model : M3 ############------------------------------------------------------------
+```{r M3}
+# Model with six covariates (All personal covariate) 
+
+M3 <- brm(formula = depressed ~ sex + Age + Married + 
+            Number_children + education_level + total_members,  
+          data=df_updated, 
+          family = bernoulli(link = "logit"), save_pars = save_pars(all = TRUE))
+```
+
+#### Model Summary 
+```{r M3:Summary}
+summary(M3)
+```
+
+### Model Convergence Check
+
+#### Trace Plot 
+```{r M3: Trace plot}
+mcmc_plot(M3, type = "trace")
+```
+
+#### Autocorrelation Plot
+```{r M3: autocorrelation}
+mcmc_plot(M3, type = "acf_bar")
+```
+
+#### Parameter Estimates
+```{r M3: Parameter estimates}
+#To interpret the value of the parameter estimates, need to exponentiate the estimates
+exp(fixef(M3)[,-2])
+
+# Plot densities of parameter estimates
+mcmc_plot(M3, type = "areas", prob = 0.95, 
+          transformations = "exp") + geom_vline(xintercept = 1, color = "grey")
+```
+
+### Model Evaluation : M3 
+
+#### Posterior Predictive Checks for M3
+```{r M3: Posterior predictive check}
+# Generate posterior predictive samples
+pp_samples <- posterior_predict(M3)
+dim(pp_samples)
+
+# Compute observed and simulated proportions of depressed individuals
+observed_prop <- mean(df_updated$depressed)
+simulated_props <- colMeans(pp_samples)
+
+# Plot histogram of simulated proportions
+hist(simulated_props, main = "Posterior Predictive Check: M3",
+     xlab = "Proportion of Depressed Individuals", ylab = "Frequency",
+     breaks = 20, col = "lightblue", border = "white")
+
+# Add a vertical line for the observed proportion
+abline(v = observed_prop, col = "red", lwd = 2)
+
+# Add legend
+legend("topright", legend = c("Observed Proportion", "Simulated Proportions"),
+       col = c("red", "lightblue"), lty = 1, lwd = 2)
+```
+
+#### AUC : Compute AUC for predicting Class with the model
+```{r M3: AUC}
+Prob_M3 <- predict(M3, newdata = df_test, type = "response")
+Prob_M3 <- Prob_M3[,1]
+Pred_M3 <- prediction(Prob_M3, as.vector(pull(df_test, depressed)))
+AUC_M3 <- performance(Pred_M3, measure = "auc")
+AUC_M3 <- AUC_M3@y.values[[1]]
+AUC_M3
+```
+
+## Model : M4 ############------------------------------------------------------------
+#### Standardize 
+```{r M4: Standardize}
+# Select the columns containing the covariates that need to standardize
+covariate_cols <- c("Age", "Number_children", "education_level", "total_members")
+
+# Standardize the selected covariates
+data_standardized <- df_updated
+
+# Loop through each selected covariate and standardize it
+for (col in covariate_cols) {
+  data_standardized[[col]] <- scale(df_updated[[col]])
+}
+
+head(data_standardized)
+```
+
+#### Initialized Prior for M4 
+```{r M4: Prior}
+prior_covariates_M4 <- c(
+  set_prior("normal(0, 1)", class = "b", coef = "Age"),
+  set_prior("normal(0, 1)", class = "b", coef = "education_level"),
+  set_prior("normal(0, 1)", class = "b", coef = "Marriedyes"),
+  set_prior("normal(0, 1)", class = "b", coef = "Number_children"),
+  set_prior("normal(0, 1)", class = "b", coef = "sexmale"),
+  set_prior("normal(0, 1)", class = "b", coef = "total_members"),
+  set_prior("normal(0, 1)", class = "Intercept")
+)
+```
+
+
+```{r M4}
+# Bayesian Binomial Logistic Regression (With specified Prior)
+
+M4 <- brm(formula = depressed ~ sex + Age + Married + 
+            Number_children + education_level + total_members, 
+          data=data_standardized,
+          prior = prior_covariates_M4,
+          family = bernoulli(link = "logit"), save_pars = save_pars(all = TRUE))
+```
+
+#### Model Summary 
+```{r M4:Summary}
+summary(M4)
+```
+
+### Model Convergence Check
+
+#### Trace Plot 
+```{r M4: Trace plot}
+mcmc_plot(M4, type = "trace")
+```
+
+#### Autocorrelation Plot
+```{r M4: autocorrelation}
+mcmc_plot(M4, type = "acf_bar")
+```
+
+#### Parameter Estimates
+```{r M4: Parameter estimates}
+# Visualize the point estimates and their associated uncertainty intervals
+mcmc_plot(M4, type = "areas", prob = 0.95)
+```
+
+### Model Evaluation : M4 
+
+#### Posterior Predictive Checks for M4
+```{r M4: Posterior predictive check}
+# Generate posterior predictive samples
+pp_samples <- posterior_predict(M4)
+dim(pp_samples)
+
+# Compute observed and simulated proportions of depressed individuals
+observed_prop <- mean(df_updated$depressed)
+simulated_props <- colMeans(pp_samples)
+
+# Plot histogram of simulated proportions
+hist(simulated_props, main = "Posterior Predictive Check: M4",
+     xlab = "Proportion of Depressed Individuals", ylab = "Frequency",
+     breaks = 20, col = "lightblue", border = "white")
+
+# Add a vertical line for the observed proportion
+abline(v = observed_prop, col = "red", lwd = 2)
+
+# Add legend
+legend("topright", legend = c("Observed Proportion", "Simulated Proportions"),
+       col = c("red", "lightblue"), lty = 1, lwd = 2)
+```
+
+#### AUC : Compute AUC for predicting Class with the model
+```{r M4: AUC}
+Prob_M4 <- predict(M4, newdata = df_test, type = "response")
+Prob_M4 <- Prob_M4[,1]
+Pred_M4 <- prediction(Prob_M4, as.vector(pull(df_test, depressed)))
+AUC_M4 <- performance(Pred_M4, measure = "auc")
+AUC_M4 <- AUC_M4@y.values[[1]]
+AUC_M4
+```
+
+## Model : M5 ############------------------------------------------------------------
+#### Proportions
+```{r M5: Proportions}
+# Proportions of people being depressed across Village ID
+df_updated %>%
+  group_by(Ville_id) %>%
+  summarise(PROP = sum(depressed)/n()) %>%
+  plot()
+```
+
+#### Relationship Between SEX and depressed (group)  by Ville_id
+```{r M5: Relationship SEX and depressed}
+# Plot the relationship between SEX and depressed(group)  by Ville_id
+df_updated %>%
+  mutate(sex = if_else(sex == "male", 1, 0)) %>%
+  ggplot(aes(x = sex, y = depressed, color = as.factor(Ville_id))) +
+  geom_point(alpha = .1, position = "jitter")+
+  geom_smooth(method = "glm", se = F, 
+              method.args = list(family = "binomial")) +
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = c(0, 1)) +
+  scale_y_continuous(breaks = c(0, 1))
+```
+
+#### Relationship Between Married and depressed (group)  by Ville_id
+```{r M5: Relationship Married and depressed}
+# Plot the relationship between Married and depressed(group)  by Ville_id
+df_updated %>%
+  mutate(Married = if_else(Married == "yes", 1, 0)) %>%
+  ggplot(aes(x = Married, y = depressed, color = as.factor(Ville_id))) +
+  geom_point(alpha = .1, position = "jitter")+
+  geom_smooth(method = "glm", se = F, 
+              method.args = list(family = "binomial")) +
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = c(0, 1)) +
+  scale_y_continuous(breaks = c(0, 1))
+```
+
+#### Initialized prior for M5
+```{r M5: Prior}
+# Initialized prior for M5
+prior_covariates_M5 <- c(
+  set_prior("normal(0, 1)", class = "b", coef = "Age"),
+  set_prior("normal(0, 1)", class = "b", coef = "education_level"),
+  set_prior("normal(0, 1)", class = "b", coef = "Marriedyes"),
+  set_prior("normal(0, 1)", class = "b", coef = "Number_children"),
+  set_prior("normal(0, 1)", class = "b", coef = "sexmale"),
+  set_prior("normal(0, 1)", class = "b", coef = "total_members"),
+  set_prior("normal(0, 1)", class = "Intercept"),
+  set_prior("cauchy(0, 50)", class = "sd", group = "Ville_id")
+)
+```
+
+```{r M5}
+# Bayesian Multilevel Binary Logistic Regression (With specified Prior)
+M5 <- brm(formula = depressed ~ 1 + sex + Age + Married + Number_children + 
+            education_level + total_members +(1|Ville_id),  
+          data=data_standardized,
+          prior = prior_covariates_M5,
+          family = bernoulli(link = "logit"), save_pars = save_pars(all = TRUE))
+```
+
+#### Model Summary 
+```{r M5:Summary}
+summary(M5)
+```
+
+### Model Convergence Check
+
+#### Trace Plot 
+```{r M5: Trace plot}
+mcmc_plot(M5, type = "trace")
+```
+
+#### Autocorrelation Plot
+```{r M5: autocorrelation}
+mcmc_plot(M5, type = "acf_bar")
+```
+
+#### Parameter Estimates
+```{r M5: Parameter estimates}
+#To interpret the value of the parameter estimates, need to exponentiate the estimates
+exp(fixef(M5)[,-2])
+
+#We can also plot densities of these parameter estimates
+mcmc_plot(M5, type = "areas", prob = 0.95, 
+          transformations = "exp") + geom_vline(xintercept = 1, color = "grey")
+```
+
+### Model Evaluation : M5 
+
+#### Posterior Predictive Checks for M5
+```{r M5: Posterior predictive check}
+# Generate posterior predictive samples
+pp_samples <- posterior_predict(M5)
+dim(pp_samples)
+
+# Compute observed and simulated proportions of depressed individuals
+observed_prop <- mean(df_updated$depressed)
+simulated_props <- colMeans(pp_samples)
+
+# Plot histogram of simulated proportions
+hist(simulated_props, main = "Posterior Predictive Check: M5",
+     xlab = "Proportion of Depressed Individuals", ylab = "Frequency",
+     breaks = 20, col = "lightblue", border = "white")
+
+# Add a vertical line for the observed proportion
+abline(v = observed_prop, col = "red", lwd = 2)
+
+# Add legend
+legend("topright", legend = c("Observed Proportion", "Simulated Proportions"),
+       col = c("red", "lightblue"), lty = 1, lwd = 2)
+```
+
+#### AUC : Compute AUC for predicting Class with the model
+```{r M5: AUC}
+Prob_M5 <- predict(M5, newdata = df_test, type = "response")
+Prob_M5 <- Prob_M5[,1]
+Pred_M5 <- prediction(Prob_M5, as.vector(pull(df_test, depressed)))
+AUC_M5 <- performance(Pred_M5, measure = "auc")
+AUC_M5 <- AUC_M5@y.values[[1]]
+AUC_M5
+```
+
+## Model Comparison with 'Leave-one-out cross-validation (LOO-CV)'
+```{r Model comparison}
+### Model comparison with 'Leave-one-out cross-validation (LOO-CV)'
+
+loo(M1, M3, M4, M5)
+```
