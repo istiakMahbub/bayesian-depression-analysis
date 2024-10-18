@@ -1,3 +1,0 @@
-ABDA_Code_Group_12.Rmd and ABDA_Code_Group_12.R are two versions of the same code, offered in different formats for convenience. 
-The ABDA_Code_Group_12.html file serves as the output generated from the Rmd file. 
-Additionally, b_depressed.csv acts as the primary dataset, while test.csv serves as the test dataset.
